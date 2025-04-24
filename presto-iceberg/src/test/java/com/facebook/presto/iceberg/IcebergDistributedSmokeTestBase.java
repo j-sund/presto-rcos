@@ -15,6 +15,7 @@ package com.facebook.presto.iceberg;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.Session.SessionBuilder;
+import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.type.TimeZoneKey;
 import com.facebook.presto.hive.HdfsEnvironment;
 import com.facebook.presto.hive.HiveClientConfig;
@@ -23,6 +24,7 @@ import com.facebook.presto.hive.s3.HiveS3Config;
 import com.facebook.presto.metadata.CatalogManager;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.tree.AstVisitor;
@@ -34,6 +36,7 @@ import com.facebook.presto.testing.QueryRunner;
 import com.facebook.presto.testing.assertions.Assert;
 import com.facebook.presto.tests.AbstractTestIntegrationSmokeTest;
 import com.facebook.presto.tests.DistributedQueryRunner;
+import com.facebook.presto.tests.ResultWithQueryId;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.hadoop.fs.FileSystem;
@@ -51,6 +54,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 
+import static com.facebook.airlift.testing.Assertions.assertNotEquals;
 import static com.facebook.presto.SystemSessionProperties.LEGACY_TIMESTAMP;
 import static com.facebook.presto.common.type.TimeZoneKey.UTC_KEY;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
@@ -2087,6 +2091,112 @@ public abstract class IcebergDistributedSmokeTestBase
                     .anyMatch(code -> code.getWarningCode().equals(USE_OF_DEPRECATED_TABLE_PROPERTY.toWarningCode())));
             assertUpdate(session, "DROP TABLE " + tableName);
         });
+    }
+
+    @Test
+    public void testRuntimeMetricsReporterAcrossSchemas()
+    {
+        Session sessionTpch = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch")
+                .build();
+
+        Session sessionTpch2 = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch2")
+                .build();
+
+        DistributedQueryRunner distributedQueryRunner = (DistributedQueryRunner) getQueryRunner();
+
+        // Query from tpch.orders
+        ResultWithQueryId<MaterializedResult> resultTpch = distributedQueryRunner
+                .executeWithQueryId(sessionTpch, "SELECT * FROM orders WHERE orderkey < 100");
+
+        RuntimeStats runtimeStatsTpch = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(resultTpch.getQueryId())
+                .getQueryStats()
+                .getRuntimeStats();
+
+        // Query from tpch2.orders
+        ResultWithQueryId<MaterializedResult> resultTpch2 = distributedQueryRunner
+                .executeWithQueryId(sessionTpch2, "SELECT * FROM orders WHERE orderkey < 100");
+
+        RuntimeStats runtimeStatsTpch2 = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(resultTpch2.getQueryId())
+                .getQueryStats()
+                .getRuntimeStats();
+
+        // Verify distinct runtime metrics exist
+        assertTrue(runtimeStatsTpch.getMetrics().containsKey("iceberg.tpch.orders.scan.totalPlanningDuration"));
+        assertTrue(runtimeStatsTpch2.getMetrics().containsKey("iceberg.tpch2.orders.scan.totalPlanningDuration"));
+
+        // Combined query that touches both schemas
+        Session unionSession = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch") // doesn't matter; full path used
+                .build();
+
+        String unionQuery =
+                "SELECT * FROM iceberg.tpch.orders WHERE orderkey < 50\n" +
+                        "UNION ALL\n" +
+                        "SELECT * FROM iceberg.tpch2.orders WHERE orderkey < 50";
+
+        ResultWithQueryId<MaterializedResult> resultUnion = distributedQueryRunner
+                .executeWithQueryId(unionSession, unionQuery);
+
+        RuntimeStats runtimeStatsUnion = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(resultUnion.getQueryId())
+                .getQueryStats()
+                .getRuntimeStats();
+
+        assertTrue(runtimeStatsUnion.getMetrics().containsKey("iceberg.tpch.orders.scan.totalPlanningDuration"));
+        assertTrue(runtimeStatsUnion.getMetrics().containsKey("iceberg.tpch2.orders.scan.totalPlanningDuration"));
+
+        assertNotEquals(
+                runtimeStatsUnion.getMetrics().get("iceberg.tpch.orders.scan.resultDataFiles").getCount(),
+                runtimeStatsUnion.getMetrics().get("iceberg.tpch2.orders.scan.resultDataFiles").getCount());
+    }
+
+    @Test
+    public void testRuntimeMetricsWithFilteredProjection()
+    {
+        Session session = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch")
+                .build();
+
+        // Run a selective projection + filter query
+        String query = "SELECT orderkey FROM orders WHERE totalprice > 100000";
+
+        ResultWithQueryId<MaterializedResult> result = getDistributedQueryRunner()
+                .executeWithQueryId(session, query);
+
+        QueryId queryId = result.getQueryId();
+
+        DistributedQueryRunner distributedQueryRunner = (DistributedQueryRunner) getQueryRunner();
+
+        RuntimeStats runtimeStats = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(queryId)
+                .getQueryStats()
+                .getRuntimeStats();
+
+        // Validate that key scan metrics exist for filtered query
+        assertTrue(runtimeStats.getMetrics().containsKey("iceberg.tpch.orders.scan.totalPlanningDuration"));
+
+        // Additional example metrics to assert based on filtered projection
+        assertTrue(runtimeStats.getMetrics().containsKey("iceberg.tpch.orders.scan.resultDataFiles"));
+        assertTrue(runtimeStats.getMetrics().containsKey("iceberg.tpch.orders.scan.totalFileSizeInBytes"));
+
+        long fileCount = runtimeStats.getMetrics()
+                .get("iceberg.tpch.orders.scan.resultDataFiles")
+                .getCount();
+
+        // Not asserting an exact number since it can vary, but ensure it's > 0
+        assertTrue(fileCount > 0, "Expected at least one resultDataFile from filtered scan");
     }
 
     protected HdfsEnvironment getHdfsEnvironment()
