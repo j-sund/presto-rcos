@@ -15,6 +15,7 @@ package com.facebook.presto.iceberg;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.Session.SessionBuilder;
+import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.type.TimeZoneKey;
 import com.facebook.presto.hive.HdfsEnvironment;
 import com.facebook.presto.hive.HiveClientConfig;
@@ -34,6 +35,7 @@ import com.facebook.presto.testing.QueryRunner;
 import com.facebook.presto.testing.assertions.Assert;
 import com.facebook.presto.tests.AbstractTestIntegrationSmokeTest;
 import com.facebook.presto.tests.DistributedQueryRunner;
+import com.facebook.presto.tests.ResultWithQueryId;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.hadoop.fs.FileSystem;
@@ -2087,6 +2089,47 @@ public abstract class IcebergDistributedSmokeTestBase
                     .anyMatch(code -> code.getWarningCode().equals(USE_OF_DEPRECATED_TABLE_PROPERTY.toWarningCode())));
             assertUpdate(session, "DROP TABLE " + tableName);
         });
+    }
+
+    @Test
+    public void testRuntimeMetricsReporterAcrossSchemas()
+    {
+        Session sessionTpch = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch")
+                .build();
+
+        Session sessionTpch2 = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch2")
+                .build();
+
+        DistributedQueryRunner distributedQueryRunner = (DistributedQueryRunner) getQueryRunner();
+
+        // Query from tpch.orders
+        ResultWithQueryId<MaterializedResult> resultTpch = distributedQueryRunner
+                .executeWithQueryId(sessionTpch, "SELECT * FROM orders WHERE orderkey < 100");
+
+        RuntimeStats runtimeStatsTpch = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(resultTpch.getQueryId())
+                .getQueryStats()
+                .getRuntimeStats();
+
+        // Query from tpch2.orders
+        ResultWithQueryId<MaterializedResult> resultTpch2 = distributedQueryRunner
+                .executeWithQueryId(sessionTpch2, "SELECT * FROM orders WHERE orderkey < 100");
+
+        RuntimeStats runtimeStatsTpch2 = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(resultTpch2.getQueryId())
+                .getQueryStats()
+                .getRuntimeStats();
+
+        // Verify distinct runtime metrics exist
+        assertTrue(runtimeStatsTpch.getMetrics().containsKey("iceberg.tpch.orders.scan.totalPlanningDuration"));
+        assertTrue(runtimeStatsTpch2.getMetrics().containsKey("iceberg.tpch2.orders.scan.totalPlanningDuration"));
+
     }
 
     protected HdfsEnvironment getHdfsEnvironment()
