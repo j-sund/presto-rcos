@@ -24,6 +24,7 @@ import com.facebook.presto.hive.s3.HiveS3Config;
 import com.facebook.presto.metadata.CatalogManager;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.ConnectorSession;
+import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.tree.AstVisitor;
@@ -2157,6 +2158,45 @@ public abstract class IcebergDistributedSmokeTestBase
         assertNotEquals(
                 runtimeStatsUnion.getMetrics().get("iceberg.tpch.orders.scan.resultDataFiles").getCount(),
                 runtimeStatsUnion.getMetrics().get("iceberg.tpch2.orders.scan.resultDataFiles").getCount());
+    }
+
+    @Test
+    public void testRuntimeMetricsWithFilteredProjection()
+    {
+        Session session = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch")
+                .build();
+
+        // Run a selective projection + filter query
+        String query = "SELECT orderkey FROM orders WHERE totalprice > 100000";
+
+        ResultWithQueryId<MaterializedResult> result = getDistributedQueryRunner()
+                .executeWithQueryId(session, query);
+
+        QueryId queryId = result.getQueryId();
+
+        DistributedQueryRunner distributedQueryRunner = (DistributedQueryRunner) getQueryRunner();
+
+        RuntimeStats runtimeStats = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(queryId)
+                .getQueryStats()
+                .getRuntimeStats();
+
+        // Validate that key scan metrics exist for filtered query
+        assertTrue(runtimeStats.getMetrics().containsKey("iceberg.tpch.orders.scan.totalPlanningDuration"));
+
+        // Additional example metrics to assert based on filtered projection
+        assertTrue(runtimeStats.getMetrics().containsKey("iceberg.tpch.orders.scan.resultDataFiles"));
+        assertTrue(runtimeStats.getMetrics().containsKey("iceberg.tpch.orders.scan.totalFileSizeInBytes"));
+
+        long fileCount = runtimeStats.getMetrics()
+                .get("iceberg.tpch.orders.scan.resultDataFiles")
+                .getCount();
+
+        // Not asserting an exact number since it can vary, but ensure it's > 0
+        assertTrue(fileCount > 0, "Expected at least one resultDataFile from filtered scan");
     }
 
     protected HdfsEnvironment getHdfsEnvironment()
