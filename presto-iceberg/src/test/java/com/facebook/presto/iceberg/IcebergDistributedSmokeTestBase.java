@@ -53,6 +53,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 
+import static com.facebook.airlift.testing.Assertions.assertNotEquals;
 import static com.facebook.presto.SystemSessionProperties.LEGACY_TIMESTAMP;
 import static com.facebook.presto.common.type.TimeZoneKey.UTC_KEY;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
@@ -2130,6 +2131,32 @@ public abstract class IcebergDistributedSmokeTestBase
         assertTrue(runtimeStatsTpch.getMetrics().containsKey("iceberg.tpch.orders.scan.totalPlanningDuration"));
         assertTrue(runtimeStatsTpch2.getMetrics().containsKey("iceberg.tpch2.orders.scan.totalPlanningDuration"));
 
+        // Combined query that touches both schemas
+        Session unionSession = Session.builder(getSession())
+                .setCatalog("iceberg")
+                .setSchema("tpch") // doesn't matter; full path used
+                .build();
+
+        String unionQuery =
+                "SELECT * FROM iceberg.tpch.orders WHERE orderkey < 50\n" +
+                        "UNION ALL\n" +
+                        "SELECT * FROM iceberg.tpch2.orders WHERE orderkey < 50";
+
+        ResultWithQueryId<MaterializedResult> resultUnion = distributedQueryRunner
+                .executeWithQueryId(unionSession, unionQuery);
+
+        RuntimeStats runtimeStatsUnion = distributedQueryRunner.getCoordinator()
+                .getQueryManager()
+                .getFullQueryInfo(resultUnion.getQueryId())
+                .getQueryStats()
+                .getRuntimeStats();
+
+        assertTrue(runtimeStatsUnion.getMetrics().containsKey("iceberg.tpch.orders.scan.totalPlanningDuration"));
+        assertTrue(runtimeStatsUnion.getMetrics().containsKey("iceberg.tpch2.orders.scan.totalPlanningDuration"));
+
+        assertNotEquals(
+                runtimeStatsUnion.getMetrics().get("iceberg.tpch.orders.scan.resultDataFiles").getCount(),
+                runtimeStatsUnion.getMetrics().get("iceberg.tpch2.orders.scan.resultDataFiles").getCount());
     }
 
     protected HdfsEnvironment getHdfsEnvironment()
