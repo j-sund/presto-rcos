@@ -335,7 +335,7 @@ void from_json(const json& j, std::shared_ptr<ConnectorIndexHandle>& p);
 namespace facebook::presto::protocol {
 struct ColumnHandle : public JsonEncodedSubclass {
   virtual bool operator<(const ColumnHandle& /* o */) const {
-    throw std::runtime_error("missing operator<() in {class_name} subclass");
+    throw std::runtime_error("missing operator<() in ColumnHandle subclass");
   }
 };
 void to_json(json& j, const std::shared_ptr<ColumnHandle>& p);
@@ -1492,6 +1492,7 @@ struct IndexJoinNode : public PlanNode {
   std::shared_ptr<PlanNode> probeSource = {};
   std::shared_ptr<PlanNode> indexSource = {};
   List<EquiJoinClause> criteria = {};
+  std::shared_ptr<std::shared_ptr<RowExpression>> filter = {};
   std::shared_ptr<VariableReferenceExpression> probeHashVariable = {};
   std::shared_ptr<VariableReferenceExpression> indexHashVariable = {};
 
