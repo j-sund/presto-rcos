@@ -14,6 +14,7 @@
 package com.facebook.presto.router.scheduler;
 
 import com.facebook.airlift.log.Logger;
+import com.facebook.presto.spi.router.Scheduler;
 
 import java.net.URI;
 import java.util.List;
@@ -41,10 +42,5 @@ public class UserHashScheduler
     public void setCandidates(List<URI> candidates)
     {
         this.candidates = candidates;
-    }
-
-    public List<URI> getCandidates()
-    {
-        return candidates;
     }
 }

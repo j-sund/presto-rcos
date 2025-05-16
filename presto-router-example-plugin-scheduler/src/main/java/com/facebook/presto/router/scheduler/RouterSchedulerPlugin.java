@@ -11,18 +11,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.facebook.presto.kafka;
+package com.facebook.presto.router.scheduler;
 
-import com.google.inject.Binder;
-import com.google.inject.Module;
-import com.google.inject.Scopes;
+import com.facebook.presto.spi.RouterPlugin;
+import com.facebook.presto.spi.router.SchedulerFactory;
+import com.google.common.collect.ImmutableList;
 
-public class KafkaProducerModule
-        implements Module
+public class RouterSchedulerPlugin
+        implements RouterPlugin
 {
     @Override
-    public void configure(Binder binder)
+    public Iterable<SchedulerFactory> getSchedulerFactories()
     {
-        binder.bind(PlainTextKafkaProducerFactory.class).in(Scopes.SINGLETON);
+        return ImmutableList.of(new MetricsBasedSchedulerFactory());
     }
 }

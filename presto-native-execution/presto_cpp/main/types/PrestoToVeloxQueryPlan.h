@@ -291,4 +291,10 @@ void parseSqlFunctionHandle(
     const std::shared_ptr<protocol::SqlFunctionHandle>& sqlFunction,
     std::vector<velox::TypePtr>& rawInputTypes,
     TypeParser& typeParser);
+
+void parseIndexLookupCondition(
+    const std::shared_ptr<protocol::RowExpression>& filter,
+    const VeloxExprConverter& exprConverter,
+    bool acceptConstant,
+    std::vector<velox::core::IndexLookupConditionPtr>& joinConditionPtrs);
 } // namespace facebook::presto

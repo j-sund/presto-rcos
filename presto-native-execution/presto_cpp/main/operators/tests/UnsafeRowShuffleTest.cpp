@@ -57,20 +57,20 @@ struct TestShuffleInfo {
   }
 };
 
-int lexicographicalCompare(const BufferPtr& key1, const BufferPtr& key2) {
-  const char* data1 = static_cast<const char*>(key1->as<void>());
-  const char* data2 = static_cast<const char*>(key2->as<void>());
-  const size_t size1 = key1->size();
-  const size_t size2 = key2->size();
-  bool lessThan =
-      std::lexicographical_compare(data1, data1 + size1, data2, data2 + size2);
+int lexicographicalCompare(std::string key1, std::string key2) {
+  // doing unsinged byte comparison.
+  const auto begin1 = reinterpret_cast<unsigned char*>(key1.data());
+  const auto end1 = begin1 + key1.size();
+  const auto begin2 = reinterpret_cast<unsigned char*>(key2.data());
+  const auto end2 = begin2 + key2.size();
+  bool lessThan = std::lexicographical_compare(begin1, end1, begin2, end2);
 
-  bool equal = std::equal(data1, data1 + size1, data2, data2 + size2);
+  bool equal = std::equal(begin1, end1, begin2, end2);
 
   return lessThan ? -1 : (equal ? 0 : 1);
 }
 
-std::vector<int> getSortOrder(const std::vector<BufferPtr>& keys) {
+std::vector<int> getSortOrder(const std::vector<std::string>& keys) {
   std::vector<int> order(keys.size());
   std::iota(order.begin(), order.end(), 0); // Fill with 0, 1, 2, ..., n-1
 
@@ -96,7 +96,7 @@ class TestShuffleWriter : public ShuffleWriter {
         readyPartitions_(
             std::make_shared<std::vector<std::vector<BufferPtr>>>()),
         serializedSortKeys_(
-            std::make_shared<std::vector<std::vector<BufferPtr>>>()) {
+            std::make_shared<std::vector<std::vector<std::string>>>()) {
     inProgressPartitions_.resize(numPartitions_);
     readyPartitions_->resize(numPartitions_);
     serializedSortKeys_->resize(numPartitions_);
@@ -144,10 +144,7 @@ class TestShuffleWriter : public ShuffleWriter {
     inProgressSizes_[partition] += size;
 
     if (!key.empty()) {
-      auto keyBuffer = AlignedBuffer::allocate<char>(maxKeyBytes_, pool_);
-      auto* rawKeyBuffer = keyBuffer->asMutable<char>();
-      ::memcpy(rawKeyBuffer, key.data(), key.size());
-      serializedSortKeys_->at(partition).emplace_back(std::move(keyBuffer));
+      serializedSortKeys_->at(partition).emplace_back(key);
     }
   }
 
@@ -174,7 +171,7 @@ class TestShuffleWriter : public ShuffleWriter {
     return readyPartitions_;
   }
 
-  std::shared_ptr<std::vector<std::vector<BufferPtr>>>& serializedSortKeys() {
+  std::shared_ptr<std::vector<std::vector<std::string>>>& serializedSortKeys() {
     return serializedSortKeys_;
   }
 
@@ -218,7 +215,7 @@ class TestShuffleWriter : public ShuffleWriter {
   /// inProgressPartitions_
   std::vector<size_t> inProgressSizes_;
   std::shared_ptr<std::vector<std::vector<BufferPtr>>> readyPartitions_;
-  std::shared_ptr<std::vector<std::vector<BufferPtr>>> serializedSortKeys_;
+  std::shared_ptr<std::vector<std::vector<std::string>>> serializedSortKeys_;
 };
 
 class TestShuffleReader : public ShuffleReader {
@@ -453,8 +450,7 @@ class UnsafeRowShuffleTest : public exec::test::OperatorTestBase {
       const RowVectorPtr& expected,
       const exec::CursorParameters params,
       const std::optional<uint32_t> expectedOutputCount = std::nullopt) {
-    auto [taskCursor, serializedResults] =
-        exec::test::readCursor(params, [](auto /*task*/) {});
+    auto [taskCursor, serializedResults] = exec::test::readCursor(params);
 
     RowVectorPtr result =
         BaseVector::create<RowVector>(expected->type(), 0, pool());
@@ -486,18 +482,17 @@ class UnsafeRowShuffleTest : public exec::test::OperatorTestBase {
   runShuffleReadTask(
       const exec::CursorParameters& params,
       const std::string& shuffleInfo) {
-    bool noMoreSplits = false;
-    return exec::test::readCursor(params, [&](auto* task) {
-      if (noMoreSplits) {
+    return exec::test::readCursor(params, [&](exec::TaskCursor* taskCursor) {
+      if (taskCursor->noMoreSplits()) {
         return;
       }
 
+      auto& task = taskCursor->task();
       auto remoteSplit = std::make_shared<exec::RemoteConnectorSplit>(
           makeTaskId("read", 0, shuffleInfo));
-
       task->addSplit("0", exec::Split{remoteSplit});
       task->noMoreSplits("0");
-      noMoreSplits = true;
+      taskCursor->setNoMoreSplits();
     });
   }
 
@@ -841,8 +836,7 @@ TEST_F(UnsafeRowShuffleTest, operators) {
   params.planNode = plan;
   params.maxDrivers = 2;
 
-  auto [taskCursor, serializedResults] =
-      exec::test::readCursor(params, [](auto /*task*/) {});
+  auto [taskCursor, serializedResults] = exec::test::readCursor(params);
   ASSERT_EQ(serializedResults.size(), 0);
   TestShuffleWriter::reset();
 }
@@ -873,8 +867,7 @@ DEBUG_ONLY_TEST_F(UnsafeRowShuffleTest, shuffleWriterExceptions) {
           .planNode();
 
   VELOX_ASSERT_THROW(
-      exec::test::readCursor(params, [](auto /*task*/) {}),
-      "ShuffleWriter::collect failed");
+      exec::test::readCursor(params), "ShuffleWriter::collect failed");
 
   TestShuffleWriter::reset();
   exec::test::waitForAllTasksToBeDeleted();
@@ -898,7 +891,7 @@ DEBUG_ONLY_TEST_F(UnsafeRowShuffleTest, shuffleReaderExceptions) {
               2, std::string(TestShuffleFactory::kShuffleName), info))
           .planNode();
 
-  ASSERT_NO_THROW(exec::test::readCursor(params, [](auto /*task*/) {}));
+  ASSERT_NO_THROW(exec::test::readCursor(params));
 
   std::function<void(TestShuffleReader*)> injectFailure =
       [&](TestShuffleReader* /*reader*/) {
@@ -956,14 +949,19 @@ TEST_F(UnsafeRowShuffleTest, endToEndWithSortedShuffle) {
   size_t numPartitions = 2;
   size_t numMapDrivers = 1;
 
-  auto data = makeRowVector({
+  auto batch1 = makeRowVector({
       makeFlatVector<int32_t>({0, 0, 1, 1, 1, 1}), // partition key
       makeFlatVector<int64_t>({30, 10, 20, 50, 40, 60}), // sorting column
   });
 
+  auto batch2 = makeRowVector({
+      makeFlatVector<int32_t>({0, 0, 1}), // partition key
+      makeFlatVector<int64_t>({70, 80, 90}), // sorting column
+  });
+
   auto expectedSortingOrder = {
-      std::vector<int>{1, 0}, // partition key 0
-      std::vector<int>{0, 2, 1, 3} // partition key 1
+      std::vector<int>{1, 0, 2, 3}, // partition key 0
+      std::vector<int>{0, 2, 1, 3, 4}, // partition key 1
   };
 
   auto ordering = {velox::core::SortOrder(velox::core::kAscNullsFirst)};
@@ -983,7 +981,7 @@ TEST_F(UnsafeRowShuffleTest, endToEndWithSortedShuffle) {
       false,
       numPartitions,
       numMapDrivers,
-      {data},
+      {batch1, batch2},
       kFakeBackgroundCpuTimeMs * Timestamp::kNanosecondsInMillisecond,
       ordering,
       fields,
