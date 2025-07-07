@@ -28,6 +28,7 @@ import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.iterative.IterativeOptimizer;
 import com.facebook.presto.sql.planner.iterative.Rule;
 import com.facebook.presto.sql.planner.iterative.properties.LogicalPropertiesProviderImpl;
+import com.facebook.presto.sql.planner.iterative.rule.AddDistinctForSemiJoinBuild;
 import com.facebook.presto.sql.planner.iterative.rule.AddExchangesBelowPartialAggregationOverGroupIdRuleSet;
 import com.facebook.presto.sql.planner.iterative.rule.AddIntermediateAggregations;
 import com.facebook.presto.sql.planner.iterative.rule.AddNotNullFiltersToJoinNode;
@@ -124,6 +125,7 @@ import com.facebook.presto.sql.planner.iterative.rule.RemoveUnreferencedScalarAp
 import com.facebook.presto.sql.planner.iterative.rule.RemoveUnreferencedScalarLateralNodes;
 import com.facebook.presto.sql.planner.iterative.rule.RemoveUnsupportedDynamicFilters;
 import com.facebook.presto.sql.planner.iterative.rule.ReorderJoins;
+import com.facebook.presto.sql.planner.iterative.rule.ReplaceConditionalApproxDistinct;
 import com.facebook.presto.sql.planner.iterative.rule.RewriteAggregationIfToFilter;
 import com.facebook.presto.sql.planner.iterative.rule.RewriteCaseExpressionPredicate;
 import com.facebook.presto.sql.planner.iterative.rule.RewriteCaseToMap;
@@ -459,6 +461,12 @@ public class PlanOptimizers
                         ruleStats,
                         statsCalculator,
                         estimatedExchangesCostCalculator,
+                        ImmutableSet.of(new ReplaceConditionalApproxDistinct(metadata.getFunctionAndTypeManager()))),
+                new IterativeOptimizer(
+                        metadata,
+                        ruleStats,
+                        statsCalculator,
+                        estimatedExchangesCostCalculator,
                         ImmutableSet.of(
                                 new SimplifySortWithConstantInput(),
                                 new SimplifyTopNWithConstantInput(),
@@ -593,6 +601,12 @@ public class PlanOptimizers
                         statsCalculator,
                         estimatedExchangesCostCalculator,
                         ImmutableSet.of(new LeftJoinNullFilterToSemiJoin(metadata.getFunctionAndTypeManager()))),
+                new IterativeOptimizer(
+                        metadata,
+                        ruleStats,
+                        statsCalculator,
+                        estimatedExchangesCostCalculator,
+                        ImmutableSet.of(new AddDistinctForSemiJoinBuild())),
                 new KeyBasedSampler(metadata),
                 new IterativeOptimizer(
                         metadata,

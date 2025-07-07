@@ -51,6 +51,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
+import static com.facebook.presto.SystemSessionProperties.ADD_DISTINCT_BELOW_SEMI_JOIN_BUILD;
 import static com.facebook.presto.SystemSessionProperties.ADD_PARTIAL_NODE_FOR_ROW_NUMBER_WITH_LIMIT;
 import static com.facebook.presto.SystemSessionProperties.ENABLE_INTERMEDIATE_AGGREGATIONS;
 import static com.facebook.presto.SystemSessionProperties.FIELD_NAMES_IN_JSON_CAST_ENABLED;
@@ -68,6 +69,7 @@ import static com.facebook.presto.SystemSessionProperties.MERGE_DUPLICATE_AGGREG
 import static com.facebook.presto.SystemSessionProperties.OFFSET_CLAUSE_ENABLED;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZER_USE_HISTOGRAMS;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_CASE_EXPRESSION_PREDICATE;
+import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_CONDITIONAL_CONSTANT_APPROXIMATE_DISTINCT;
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZE_HASH_GENERATION;
 import static com.facebook.presto.SystemSessionProperties.PREFILTER_FOR_GROUPBY_LIMIT;
 import static com.facebook.presto.SystemSessionProperties.PREFILTER_FOR_GROUPBY_LIMIT_TIMEOUT_MS;
@@ -5140,19 +5142,19 @@ public abstract class AbstractTestQueries
         assertAccessDenied("INSERT INTO orders SELECT * FROM orders", "Cannot insert into table .*.orders.*", privilege("orders", INSERT_TABLE));
         assertAccessDenied("DELETE FROM orders", "Cannot delete from table .*.orders.*", privilege("orders", DELETE_TABLE));
         assertAccessDenied("CREATE TABLE foo AS SELECT * FROM orders", "Cannot create table .*.foo.*", privilege("foo", CREATE_TABLE));
-        assertAccessDenied("SELECT * FROM nation", "Cannot select from columns \\[nationkey, regionkey, name, comment\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
-        assertAccessDenied("SELECT * FROM (SELECT * FROM nation)", "Cannot select from columns \\[nationkey, regionkey, name, comment\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
-        assertAccessDenied("SELECT name FROM (SELECT * FROM nation)", "Cannot select from columns \\[nationkey, regionkey, name, comment\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
+        assertAccessDenied("SELECT * FROM nation", "Cannot select from columns \\[comment, name, nationkey, regionkey\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
+        assertAccessDenied("SELECT * FROM (SELECT * FROM nation)", "Cannot select from columns \\[comment, name, nationkey, regionkey\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
+        assertAccessAllowed("SELECT name FROM (SELECT * FROM nation)", privilege("nationkey", SELECT_COLUMN));
         assertAccessAllowed("SELECT name FROM nation", privilege("nationkey", SELECT_COLUMN));
         assertAccessDenied("SELECT n1.nationkey, n2.regionkey FROM nation n1, nation n2", "Cannot select from columns \\[nationkey, regionkey\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
-        assertAccessDenied("SELECT count(name) as c FROM nation where comment > 'abc' GROUP BY regionkey having max(nationkey) > 10", "Cannot select from columns \\[nationkey, regionkey, name, comment\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
+        assertAccessDenied("SELECT count(name) as c FROM nation where comment > 'abc' GROUP BY regionkey having max(nationkey) > 10", "Cannot select from columns \\[comment, name, nationkey, regionkey\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
         assertAccessDenied("SELECT 1 FROM region, nation where region.regionkey = nation.nationkey", "Cannot select from columns \\[nationkey\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
         assertAccessDenied("SELECT count(*) FROM nation", "Cannot select from columns \\[\\] in table .*.nation.*", privilege("nation", SELECT_COLUMN));
-        assertAccessDenied("WITH t1 AS (SELECT * FROM nation) SELECT * FROM t1", "Cannot select from columns \\[nationkey, regionkey, name, comment\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
+        assertAccessDenied("WITH t1 AS (SELECT * FROM nation) SELECT * FROM t1", "Cannot select from columns \\[comment, name, nationkey, regionkey\\] in table .*.nation.*", privilege("nationkey", SELECT_COLUMN));
         assertAccessAllowed("SELECT name AS my_alias FROM nation", privilege("my_alias", SELECT_COLUMN));
         assertAccessAllowed("SELECT my_alias from (SELECT name AS my_alias FROM nation)", privilege("my_alias", SELECT_COLUMN));
         assertAccessDenied("SELECT name AS my_alias FROM nation", "Cannot select from columns \\[name\\] in table .*.nation.*", privilege("name", SELECT_COLUMN));
-        assertAccessDenied("SELECT nation.name FROM nation JOIN region USING (regionkey)", "Cannot select from columns \\[regionkey, name\\] in table .*", privilege("regionkey", SELECT_COLUMN));
+        assertAccessDenied("SELECT regionkey FROM nation as n1 join region as r1 using (regionkey)", "Cannot select from columns \\[regionkey\\] in table .*", privilege("regionkey", SELECT_COLUMN));
         assertAccessDenied("SELECT array_agg(regionkey ORDER BY regionkey) FROM nation JOIN region USING (regionkey)", "Cannot select from columns \\[regionkey\\] in table .*", privilege("regionkey", SELECT_COLUMN));
     }
 
@@ -6803,6 +6805,41 @@ public abstract class AbstractTestQueries
     }
 
     @Test
+    public void testReplaceConditionalApproxDistinct()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(OPTIMIZE_CONDITIONAL_CONSTANT_APPROXIMATE_DISTINCT, "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty(OPTIMIZE_CONDITIONAL_CONSTANT_APPROXIMATE_DISTINCT, "false")
+                .build();
+
+        List<String> queries = ImmutableList.of(
+                "select approx_distinct(if(%s, 1, 2)) from orders %s",
+                "select approx_distinct(if(%s, 3)) from orders %s",
+                "select approx_distinct(if(%s, 4, NULL)) from orders %s",
+                "select approx_distinct(if(%s, NULL, 5)) from orders %s",
+                "select approx_distinct(if(%s, NULL)) from orders %s",
+                "select approx_distinct(if(%s, NULL, NULL)) from orders %s");
+        List<String> conditions = ImmutableList.of(
+                "orderkey = orderkey",
+                "orderkey % 2 = 0");
+        List<String> suffixes = ImmutableList.of(
+                "",
+                "where orderkey % 3 = 0",
+                "group by orderkey");
+
+        for (String query : queries) {
+            for (String condition : conditions) {
+                for (String suffix : suffixes) {
+                    String sql = format(query, condition, suffix);
+                    assertQueryWithSameQueryRunner(enabled, sql, disabled);
+                }
+            }
+        }
+    }
+
+    @Test
     public void testSameAggregationWithAndWithoutFilter()
     {
         Session enableOptimization = Session.builder(getSession())
@@ -7890,6 +7927,16 @@ public abstract class AbstractTestQueries
                 ".*Out of range for integer.*");
         assertQuery(enableOptimization, "select feature[key] from (values (map(array[cast(1 as varchar), '2', '3', '4'], array[0.3, 0.5, 0.9, 0.1]), cast('2' as varchar)), (map(array[cast(1 as varchar), '2', '3', '4'], array[0.3, 0.5, 0.9, 0.1]), '4')) t(feature,  key)",
                 "values 0.5, 0.1");
+
+        Session disableOptimization = Session.builder(getSession())
+                .setSystemProperty(REMOVE_MAP_CAST, "false")
+                .build();
+        assertQueryWithSameQueryRunner(enableOptimization, "select map_subset(feature, array[key]) from (values (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), cast(2 as bigint)), (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), 4)) t(feature,  key)", disableOptimization);
+        assertQueryWithSameQueryRunner(enableOptimization, "select map_subset(feature, array[1, cast(3 as bigint)]) from (values (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), cast(2 as bigint)), (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), 4)) t(feature,  key)", disableOptimization);
+        assertQueryWithSameQueryRunner(enableOptimization, "select map_subset(feature, array[1, 3, key]) from (values (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), cast(2 as bigint)), (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), 4)) t(feature,  key)", disableOptimization);
+        assertQueryWithSameQueryRunner(enableOptimization, "select map_subset(feature, array[key]) from (values (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), cast(2 as bigint)), (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), 400000000000)) t(feature, key)", disableOptimization);
+        assertQueryWithSameQueryRunner(enableOptimization, "select map_subset(feature, array[1, 400000000000]) from (values (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), cast(2 as bigint)), (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), 400000000000)) t(feature, key)", disableOptimization);
+        assertQueryWithSameQueryRunner(enableOptimization, "select map_subset(feature, array[key, 2, 400000000000]) from (values (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), cast(2 as bigint)), (map(array[cast(1 as integer), 2, 3, 4], array[0.3, 0.5, 0.9, 0.1]), 400000000000)) t(feature, key)", disableOptimization);
     }
 
     // Test to guardrail problems in constraint framework mentioned in https://github.com/prestodb/presto/pull/22171
@@ -7989,6 +8036,56 @@ public abstract class AbstractTestQueries
         assertQuery(enableOptimization, "WITH t(msg) AS (SELECT * FROM (VALUES ROW(CAST(ROW(1, 2.0) AS ROW(x BIGINT, y DOUBLE))))) SELECT b.msg.x FROM t a, t b WHERE a.msg.y = b.msg.y limit 100",
                 "values 1");
         assertQuery(enableOptimization, "select orderkey, col1 from orders cross join (select cast(col as varchar) col1 from (values 1) t(col))");
+    }
+
+    @Test
+    public void testAddDistinctForSemiJoinBuild()
+    {
+        Session enabled = Session.builder(getSession())
+                .setSystemProperty(ADD_DISTINCT_BELOW_SEMI_JOIN_BUILD, "true")
+                .build();
+        Session disabled = Session.builder(getSession())
+                .setSystemProperty(ADD_DISTINCT_BELOW_SEMI_JOIN_BUILD, "false")
+                .build();
+        @Language("SQL") String sql = "SELECT * FROM customer c WHERE custkey in ( SELECT custkey FROM orders o WHERE o.orderdate > date('1995-01-01'))";
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
+        sql = "SELECT * FROM customer c WHERE custkey in ( SELECT distinct custkey FROM orders o WHERE o.orderdate > date('1995-01-01'))";
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
+        sql = "SELECT *\n" +
+                "FROM customer c\n" +
+                "WHERE c.custkey IN (\n" +
+                "  SELECT o.custkey\n" +
+                "  FROM orders o\n" +
+                "  WHERE o.totalprice > 1000\n" +
+                ")";
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
+        sql = "SELECT c.name\n" +
+                "FROM customer c\n" +
+                "WHERE c.custkey IN (\n" +
+                "    SELECT o.custkey\n" +
+                "    FROM orders o\n" +
+                ")";
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
+        sql = "SELECT s.name\n" +
+                "FROM supplier s\n" +
+                "WHERE s.suppkey IN (\n" +
+                "    SELECT l.suppkey\n" +
+                "    FROM lineitem l\n" +
+                ")";
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
+        sql = "SELECT c.name FROM customer c WHERE c.custkey IN ( SELECT o.custkey FROM orders o JOIN lineitem l ON o.orderkey = l.orderkey WHERE l.partkey > 1235 )";
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
+        sql = "SELECT p.name\n" +
+                "FROM part p\n" +
+                "WHERE p.partkey IN (\n" +
+                "    SELECT l.partkey\n" +
+                "    FROM lineitem l\n" +
+                "    JOIN orders o ON l.orderkey = o.orderkey\n" +
+                "    JOIN customer c ON o.custkey = c.custkey\n" +
+                "    JOIN nation n ON c.nationkey = n.nationkey\n" +
+                "    WHERE n.name = 'UNITED STATES'\n" +
+                ")";
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
     }
 
     /**
@@ -8133,6 +8230,19 @@ public abstract class AbstractTestQueries
                 "(6, '2025-01-16', MAP(ARRAY[9, 1, 3], ARRAY[0.30, 0.40, 0.50]), MAP(ARRAY['c', 'd'], ARRAY[0.90, 0.10])), (2, '2025-01-05', MAP(ARRAY[3, 4], ARRAY[0.98, 0.21]), MAP(ARRAY['e', 'f'], ARRAY[0.56, 0.44])), " +
                 "(1, '2025-01-04', MAP(ARRAY[1, 2], ARRAY[0.45, 0.67]), MAP(ARRAY['g', 'h'], ARRAY[0.23, 0.77])) ) t(id, ds, feature, extra_feature)) " +
                 "select id, min(ds), min_by(feature, ds), min_by(extra_feature, ds) from t group by id";
+
+        result = computeActual(enabled, "explain(type distributed) " + sql);
+        assertNotEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("TopNRowNumber"), -1);
+
+        assertQueryWithSameQueryRunner(enabled, sql, disabled);
+
+        sql = "with t as (SELECT * FROM ( VALUES (3, 100, '2025-01-08', MAP(ARRAY[2, 1], ARRAY[0.34, 0.92]), MAP(ARRAY['a', 'b'], ARRAY[0.12, 0.88])), " +
+                "(1, 20, '2025-01-02', MAP(ARRAY[1, 3], ARRAY[0.23, 0.5]), MAP(ARRAY['x', 'y'], ARRAY[0.45, 0.55])), (7, 90, '2025-01-17', MAP(ARRAY[6, 8], ARRAY[0.60, 0.70]), MAP(ARRAY['m', 'n'], ARRAY[0.21, 0.79])), " +
+                "(2, 10, '2025-01-06', MAP(ARRAY[2, 3, 5, 7], ARRAY[0.75, 0.32, 0.19, 0.46]), MAP(ARRAY['p', 'q', 'r'], ARRAY[0.11, 0.22, 0.67])), (5, 65, '2025-01-14', MAP(ARRAY[8, 4, 6], ARRAY[0.88, 0.99, 0.00]), MAP(ARRAY['s', 't', 'u'], ARRAY[0.33, 0.44, 0.23])), " +
+                "(4, 40, '2025-01-12', MAP(ARRAY[7, 3, 2], ARRAY[0.33, 0.44, 0.55]), MAP(ARRAY['v', 'w'], ARRAY[0.66, 0.34])), (8, 68, '2025-01-20', MAP(ARRAY[1, 7, 6], ARRAY[0.35, 0.45, 0.55]), MAP(ARRAY['i', 'j', 'k'], ARRAY[0.78, 0.89, 0.12])), " +
+                "(6, 101, '2025-01-16', MAP(ARRAY[9, 1, 3], ARRAY[0.30, 0.40, 0.50]), MAP(ARRAY['c', 'd'], ARRAY[0.90, 0.10])), (2, 35, '2025-01-05', MAP(ARRAY[3, 4], ARRAY[0.98, 0.21]), MAP(ARRAY['e', 'f'], ARRAY[0.56, 0.44])), " +
+                "(1, 25, '2025-01-04', MAP(ARRAY[1, 2], ARRAY[0.45, 0.67]), MAP(ARRAY['g', 'h'], ARRAY[0.23, 0.77])) ) t(id, key, ds, feature, extra_feature)) " +
+                "select id, min(ds), min_by(feature, ds), min_by(extra_feature, ds), min_by(key, ds) from t group by id";
 
         result = computeActual(enabled, "explain(type distributed) " + sql);
         assertNotEquals(((String) result.getMaterializedRows().get(0).getField(0)).indexOf("TopNRowNumber"), -1);

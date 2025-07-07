@@ -132,6 +132,7 @@ import com.facebook.presto.operator.window.WindowFunctionSupplier;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorIndex;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.PrestoWarning;
 import com.facebook.presto.spi.RecordSet;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.function.FunctionHandle;
@@ -155,6 +156,7 @@ import com.facebook.presto.spi.plan.JoinDistributionType;
 import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.plan.LimitNode;
 import com.facebook.presto.spi.plan.MarkDistinctNode;
+import com.facebook.presto.spi.plan.MetadataDeleteNode;
 import com.facebook.presto.spi.plan.OrderingScheme;
 import com.facebook.presto.spi.plan.OutputNode;
 import com.facebook.presto.spi.plan.PartitioningScheme;
@@ -172,6 +174,7 @@ import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.plan.UnionNode;
+import com.facebook.presto.spi.plan.UnnestNode;
 import com.facebook.presto.spi.plan.ValuesNode;
 import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.plan.WindowNode.Frame;
@@ -204,14 +207,12 @@ import com.facebook.presto.sql.planner.plan.ExplainAnalyzeNode;
 import com.facebook.presto.sql.planner.plan.GroupIdNode;
 import com.facebook.presto.sql.planner.plan.IndexJoinNode;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
-import com.facebook.presto.sql.planner.plan.MetadataDeleteNode;
 import com.facebook.presto.sql.planner.plan.RemoteSourceNode;
 import com.facebook.presto.sql.planner.plan.RowNumberNode;
 import com.facebook.presto.sql.planner.plan.SampleNode;
 import com.facebook.presto.sql.planner.plan.StatisticsWriterNode;
 import com.facebook.presto.sql.planner.plan.TableWriterMergeNode;
 import com.facebook.presto.sql.planner.plan.TopNRowNumberNode;
-import com.facebook.presto.sql.planner.plan.UnnestNode;
 import com.facebook.presto.sql.planner.plan.UpdateNode;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.sql.relational.VariableToChannelTranslator;
@@ -313,6 +314,7 @@ import static com.facebook.presto.sessionpropertyproviders.JavaWorkerSessionProp
 import static com.facebook.presto.spi.StandardErrorCode.COMPILER_ERROR;
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
+import static com.facebook.presto.spi.StandardWarningCode.PERFORMANCE_WARNING;
 import static com.facebook.presto.spi.plan.AggregationNode.Step.FINAL;
 import static com.facebook.presto.spi.plan.AggregationNode.Step.INTERMEDIATE;
 import static com.facebook.presto.spi.plan.AggregationNode.Step.PARTIAL;
@@ -325,6 +327,7 @@ import static com.facebook.presto.spi.plan.ProjectNode.Locality.REMOTE;
 import static com.facebook.presto.spi.relation.ExpressionOptimizer.Level.OPTIMIZED;
 import static com.facebook.presto.sql.analyzer.ExpressionTreeUtils.createSymbolReference;
 import static com.facebook.presto.sql.analyzer.TypeSignatureProvider.fromTypes;
+import static com.facebook.presto.sql.gen.CursorProcessorCompiler.HIGH_PROJECTION_WARNING_THRESHOLD;
 import static com.facebook.presto.sql.gen.LambdaBytecodeGenerator.compileLambdaProvider;
 import static com.facebook.presto.sql.planner.RowExpressionInterpreter.rowExpressionInterpreter;
 import static com.facebook.presto.sql.planner.SortExpressionExtractor.getSortExpressionContext;
@@ -1513,6 +1516,13 @@ public class LocalExecutionPlanner
                     .collect(toImmutableList());
 
             try {
+                if (projections.size() >= HIGH_PROJECTION_WARNING_THRESHOLD) {
+                    session.getWarningCollector().add(new PrestoWarning(
+                            PERFORMANCE_WARNING.toWarningCode(),
+                            String.format("Query contains %d projections, which exceeds the recommended threshold of %d. " +
+                                            "Queries with very high projection counts may encounter JVM constant pool limits or performance issues.",
+                                    projections.size(), HIGH_PROJECTION_WARNING_THRESHOLD)));
+                }
                 if (columns != null) {
                     Supplier<CursorProcessor> cursorProcessor = expressionCompiler.compileCursorProcessor(
                             session.getSqlFunctionProperties(),
@@ -2919,8 +2929,10 @@ public class LocalExecutionPlanner
         public PhysicalOperation visitDelete(DeleteNode node, LocalExecutionPlanContext context)
         {
             PhysicalOperation source = node.getSource().accept(this, context);
-
-            OperatorFactory operatorFactory = new DeleteOperatorFactory(context.getNextOperatorId(), node.getId(), source.getLayout().get(node.getRowId()), tableCommitContextCodec);
+            if (!node.getRowId().isPresent()) {
+                throw new PrestoException(NOT_SUPPORTED, "DELETE is not supported by this connector");
+            }
+            OperatorFactory operatorFactory = new DeleteOperatorFactory(context.getNextOperatorId(), node.getId(), source.getLayout().get(node.getRowId().get()), tableCommitContextCodec);
 
             Map<VariableReferenceExpression, Integer> layout = ImmutableMap.<VariableReferenceExpression, Integer>builder()
                     .put(node.getOutputVariables().get(0), 0)

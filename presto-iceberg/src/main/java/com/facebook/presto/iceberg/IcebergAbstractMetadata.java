@@ -15,6 +15,7 @@ package com.facebook.presto.iceberg;
 
 import com.facebook.airlift.json.JsonCodec;
 import com.facebook.airlift.log.Logger;
+import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.Subfield;
 import com.facebook.presto.common.predicate.TupleDomain;
 import com.facebook.presto.common.type.BigintType;
@@ -130,12 +131,18 @@ import static com.facebook.presto.hive.MetadataUtils.isEntireColumn;
 import static com.facebook.presto.iceberg.ExpressionConverter.toIcebergExpression;
 import static com.facebook.presto.iceberg.IcebergColumnHandle.DATA_SEQUENCE_NUMBER_COLUMN_HANDLE;
 import static com.facebook.presto.iceberg.IcebergColumnHandle.DATA_SEQUENCE_NUMBER_COLUMN_METADATA;
+import static com.facebook.presto.iceberg.IcebergColumnHandle.DELETE_FILE_PATH_COLUMN_HANDLE;
+import static com.facebook.presto.iceberg.IcebergColumnHandle.DELETE_FILE_PATH_COLUMN_METADATA;
+import static com.facebook.presto.iceberg.IcebergColumnHandle.IS_DELETED_COLUMN_HANDLE;
+import static com.facebook.presto.iceberg.IcebergColumnHandle.IS_DELETED_COLUMN_METADATA;
 import static com.facebook.presto.iceberg.IcebergColumnHandle.PATH_COLUMN_HANDLE;
 import static com.facebook.presto.iceberg.IcebergColumnHandle.PATH_COLUMN_METADATA;
 import static com.facebook.presto.iceberg.IcebergErrorCode.ICEBERG_COMMIT_ERROR;
 import static com.facebook.presto.iceberg.IcebergErrorCode.ICEBERG_INVALID_SNAPSHOT_ID;
 import static com.facebook.presto.iceberg.IcebergMetadataColumn.DATA_SEQUENCE_NUMBER;
+import static com.facebook.presto.iceberg.IcebergMetadataColumn.DELETE_FILE_PATH;
 import static com.facebook.presto.iceberg.IcebergMetadataColumn.FILE_PATH;
+import static com.facebook.presto.iceberg.IcebergMetadataColumn.IS_DELETED;
 import static com.facebook.presto.iceberg.IcebergMetadataColumn.UPDATE_ROW_DATA;
 import static com.facebook.presto.iceberg.IcebergPartitionType.ALL;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.getCompressionCodec;
@@ -284,12 +291,14 @@ public abstract class IcebergAbstractMetadata
             partitions = ImmutableList.of(new HivePartition(handle.getSchemaTableName()));
         }
         else {
+            RuntimeStats runtimeStats = session.getRuntimeStats();
             partitions = getPartitions(
                     typeManager,
                     handle,
                     icebergTable,
                     constraint,
-                    partitionColumns);
+                    partitionColumns,
+                    runtimeStats);
         }
 
         ConnectorTableLayout layout = getTableLayout(
@@ -431,6 +440,8 @@ public abstract class IcebergAbstractMetadata
             else {
                 columns.add(PATH_COLUMN_METADATA);
                 columns.add(DATA_SEQUENCE_NUMBER_COLUMN_METADATA);
+                columns.add(IS_DELETED_COLUMN_METADATA);
+                columns.add(DELETE_FILE_PATH_COLUMN_METADATA);
             }
             return new ConnectorTableMetadata(table, columns.build(), createMetadataProperties(icebergTable, session), getTableComment(icebergTable));
         }
@@ -687,9 +698,9 @@ public abstract class IcebergAbstractMetadata
     }
 
     @Override
-    public ColumnHandle getDeleteRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
+    public Optional<ColumnHandle> getDeleteRowIdColumn(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        return IcebergColumnHandle.create(ROW_POSITION, typeManager, REGULAR);
+        return Optional.of(IcebergColumnHandle.create(ROW_POSITION, typeManager, REGULAR));
     }
 
     @Override
@@ -932,6 +943,8 @@ public abstract class IcebergAbstractMetadata
         if (table.getIcebergTableName().getTableType() != CHANGELOG) {
             columnHandles.put(FILE_PATH.getColumnName(), PATH_COLUMN_HANDLE);
             columnHandles.put(DATA_SEQUENCE_NUMBER.getColumnName(), DATA_SEQUENCE_NUMBER_COLUMN_HANDLE);
+            columnHandles.put(IS_DELETED.getColumnName(), IS_DELETED_COLUMN_HANDLE);
+            columnHandles.put(DELETE_FILE_PATH.getColumnName(), DELETE_FILE_PATH_COLUMN_HANDLE);
         }
         return columnHandles.build();
     }
@@ -1261,7 +1274,7 @@ public abstract class IcebergAbstractMetadata
      * @return A column handle for the Row ID update column.
      */
     @Override
-    public ColumnHandle getUpdateRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> updatedColumns)
+    public Optional<ColumnHandle> getUpdateRowIdColumn(ConnectorSession session, ConnectorTableHandle tableHandle, List<ColumnHandle> updatedColumns)
     {
         List<NestedField> unmodifiedColumns = new ArrayList<>();
         unmodifiedColumns.add(ROW_POSITION);
@@ -1277,7 +1290,7 @@ public abstract class IcebergAbstractMetadata
             }
         }
         NestedField field = NestedField.required(UPDATE_ROW_DATA.getId(), UPDATE_ROW_DATA.getColumnName(), Types.StructType.of(unmodifiedColumns));
-        return IcebergColumnHandle.create(field, typeManager, SYNTHESIZED);
+        return Optional.of(IcebergColumnHandle.create(field, typeManager, SYNTHESIZED));
     }
 
     @Override

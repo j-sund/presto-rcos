@@ -106,6 +106,7 @@ public class FeaturesConfig
     private String historyBasedOptimizerPlanCanonicalizationStrategies = "IGNORE_SAFE_CONSTANTS";
     private boolean logPlansUsedInHistoryBasedOptimizer;
     private boolean enforceTimeoutForHBOQueryRegistration;
+    private boolean historyBasedOptimizerEstimateSizeUsingVariables;
     private boolean redistributeWrites;
     private boolean scaleWriters = true;
     private DataSize writerMinSize = new DataSize(32, MEGABYTE);
@@ -194,7 +195,7 @@ public class FeaturesConfig
     private boolean treatLowConfidenceZeroEstimationAsUnknownEnabled;
     private boolean pushdownDereferenceEnabled;
     private boolean inlineSqlFunctions = true;
-    private boolean checkAccessControlOnUtilizedColumnsOnly;
+    private boolean checkAccessControlOnUtilizedColumnsOnly = true;
     private boolean checkAccessControlWithSubfields;
     private boolean skipRedundantSort = true;
     private boolean isAllowWindowOrderByLiterals = true;
@@ -269,6 +270,7 @@ public class FeaturesConfig
     private boolean pullUpExpressionFromLambda;
     private boolean rewriteConstantArrayContainsToIn;
     private boolean rewriteExpressionWithConstantVariable = true;
+    private boolean optimizeConditionalApproxDistinct = true;
 
     private boolean preProcessMetadataCalls;
     private boolean handleComplexEquiJoins;
@@ -296,6 +298,7 @@ public class FeaturesConfig
     private boolean innerJoinPushdownEnabled;
     private boolean inEqualityJoinPushdownEnabled;
     private boolean rewriteMinMaxByToTopNEnabled;
+    private boolean broadcastSemiJoinForDelete = true;
 
     private boolean prestoSparkExecutionEnvironment;
     private boolean singleNodeExecutionEnabled;
@@ -303,6 +306,8 @@ public class FeaturesConfig
     private boolean nativeExecutionTypeRewriteEnabled;
     private String expressionOptimizerName = DEFAULT_EXPRESSION_OPTIMIZER_NAME;
     private boolean addExchangeBelowPartialAggregationOverGroupId;
+    private boolean addDistinctBelowSemiJoinBuild;
+    private boolean pushdownSubfieldForMapFunctions = true;
 
     public enum PartitioningPrecisionStrategy
     {
@@ -883,6 +888,18 @@ public class FeaturesConfig
     public FeaturesConfig setEnforceTimeoutForHBOQueryRegistration(boolean enforceTimeoutForHBOQueryRegistration)
     {
         this.enforceTimeoutForHBOQueryRegistration = enforceTimeoutForHBOQueryRegistration;
+        return this;
+    }
+
+    public boolean isHistoryBasedOptimizerEstimateSizeUsingVariables()
+    {
+        return historyBasedOptimizerEstimateSizeUsingVariables;
+    }
+
+    @Config("optimizer.history-based-optimizer-estimate-size-using-variables")
+    public FeaturesConfig setHistoryBasedOptimizerEstimateSizeUsingVariables(boolean historyBasedOptimizerEstimateSizeUsingVariables)
+    {
+        this.historyBasedOptimizerEstimateSizeUsingVariables = historyBasedOptimizerEstimateSizeUsingVariables;
         return this;
     }
 
@@ -2785,6 +2802,19 @@ public class FeaturesConfig
         return this;
     }
 
+    public boolean isOptimizeConditionalApproxDistinct()
+    {
+        return this.optimizeConditionalApproxDistinct;
+    }
+
+    @Config("optimizer.optimize-constant-approx-distinct")
+    @ConfigDescription("Optimize out APPROX_DISTINCT over conditional constant expressions")
+    public FeaturesConfig setOptimizeConditionalApproxDistinct(boolean optimizeConditionalApproxDistinct)
+    {
+        this.optimizeConditionalApproxDistinct = optimizeConditionalApproxDistinct;
+        return this;
+    }
+
     public CreateView.Security getDefaultViewSecurityMode()
     {
         return this.defaultViewSecurityMode;
@@ -2923,6 +2953,19 @@ public class FeaturesConfig
         return this;
     }
 
+    public boolean isBroadcastSemiJoinForDelete()
+    {
+        return broadcastSemiJoinForDelete;
+    }
+
+    @Config("optimizer.broadcast-semi-join-for-delete")
+    @ConfigDescription("Enforce broadcast semi join in delete queries")
+    public FeaturesConfig setBroadcastSemiJoinForDelete(boolean broadcastSemiJoinForDelete)
+    {
+        this.broadcastSemiJoinForDelete = broadcastSemiJoinForDelete;
+        return this;
+    }
+
     public boolean isInEqualityJoinPushdownEnabled()
     {
         return inEqualityJoinPushdownEnabled;
@@ -3013,5 +3056,31 @@ public class FeaturesConfig
     public boolean getAddExchangeBelowPartialAggregationOverGroupId()
     {
         return addExchangeBelowPartialAggregationOverGroupId;
+    }
+
+    @Config("optimizer.add-distinct-below-semi-join-build")
+    @ConfigDescription("Add a distinct aggregation below build side of semi join")
+    public FeaturesConfig setAddDistinctBelowSemiJoinBuild(boolean addDistinctBelowSemiJoinBuild)
+    {
+        this.addDistinctBelowSemiJoinBuild = addDistinctBelowSemiJoinBuild;
+        return this;
+    }
+
+    public boolean isAddDistinctBelowSemiJoinBuild()
+    {
+        return addDistinctBelowSemiJoinBuild;
+    }
+
+    @Config("optimizer.pushdown-subfield-for-map-functions")
+    @ConfigDescription("Enable subfield pruning for map functions, currently include map_subset and map_filter")
+    public FeaturesConfig setPushdownSubfieldForMapFunctions(boolean pushdownSubfieldForMapFunctions)
+    {
+        this.pushdownSubfieldForMapFunctions = pushdownSubfieldForMapFunctions;
+        return this;
+    }
+
+    public boolean isPushdownSubfieldForMapFunctions()
+    {
+        return pushdownSubfieldForMapFunctions;
     }
 }

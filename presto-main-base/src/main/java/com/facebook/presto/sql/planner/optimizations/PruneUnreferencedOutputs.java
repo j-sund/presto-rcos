@@ -47,6 +47,7 @@ import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.plan.UnionNode;
+import com.facebook.presto.spi.plan.UnnestNode;
 import com.facebook.presto.spi.plan.ValuesNode;
 import com.facebook.presto.spi.plan.WindowNode;
 import com.facebook.presto.spi.relation.RowExpression;
@@ -66,7 +67,6 @@ import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
 import com.facebook.presto.sql.planner.plan.StatisticsWriterNode;
 import com.facebook.presto.sql.planner.plan.TableWriterMergeNode;
 import com.facebook.presto.sql.planner.plan.TopNRowNumberNode;
-import com.facebook.presto.sql.planner.plan.UnnestNode;
 import com.facebook.presto.sql.planner.plan.UpdateNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableListMultimap;
@@ -816,7 +816,7 @@ public class PruneUnreferencedOutputs
         public PlanNode visitDelete(DeleteNode node, RewriteContext<Set<VariableReferenceExpression>> context)
         {
             ImmutableSet.Builder<VariableReferenceExpression> builder = ImmutableSet.builder();
-            builder.add(node.getRowId());
+            node.getRowId().ifPresent(r -> builder.add(r));
             if (node.getInputDistribution().isPresent()) {
                 builder.addAll(node.getInputDistribution().get().getInputVariables());
             }

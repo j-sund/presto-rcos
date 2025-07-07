@@ -15,6 +15,7 @@ package com.facebook.presto.sql.planner.iterative.rule;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.common.block.SortOrder;
+import com.facebook.presto.common.type.ArrayType;
 import com.facebook.presto.common.type.MapType;
 import com.facebook.presto.matching.Captures;
 import com.facebook.presto.matching.Pattern;
@@ -47,6 +48,34 @@ import static com.facebook.presto.sql.planner.plan.Patterns.aggregation;
 import static com.facebook.presto.sql.relational.Expressions.comparisonExpression;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 
+/**
+ * For queries with min_by/max_by functions on map, rewrite it with top n window functions.
+ * For example, for query `select id, max(ds), max_by(feature, ds) from t group by id`,
+ * it will be rewritten from:
+ * <pre>
+ * - Aggregation
+ *      ds_0 := max(ds)
+ *      feature_0 := max_by(feature, ds)
+ *      group by id
+ *      - scan t
+ *          ds
+ *          feature
+ *          id
+ * </pre>
+ * into:
+ * <pre>
+ *     - Filter
+ *          row_num = 1
+ *          - TopNRow
+ *              partition by id
+ *              order by ds desc
+ *              maxRowCountPerPartition = 1
+ *              - scan t
+ *                  ds
+ *                  feature
+ *                  id
+ * </pre>
+ */
 public class MinMaxByToWindowFunction
         implements Rule<AggregationNode>
 {
@@ -74,10 +103,10 @@ public class MinMaxByToWindowFunction
     public Result apply(AggregationNode node, Captures captures, Context context)
     {
         Map<VariableReferenceExpression, AggregationNode.Aggregation> maxByAggregations = node.getAggregations().entrySet().stream()
-                .filter(x -> functionResolution.isMaxByFunction(x.getValue().getFunctionHandle()) && x.getValue().getArguments().get(0).getType() instanceof MapType)
+                .filter(x -> functionResolution.isMaxByFunction(x.getValue().getFunctionHandle()))
                 .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
         Map<VariableReferenceExpression, AggregationNode.Aggregation> minByAggregations = node.getAggregations().entrySet().stream()
-                .filter(x -> functionResolution.isMinByFunction(x.getValue().getFunctionHandle()) && x.getValue().getArguments().get(0).getType() instanceof MapType)
+                .filter(x -> functionResolution.isMinByFunction(x.getValue().getFunctionHandle()))
                 .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
         boolean isMaxByAggregation;
         Map<VariableReferenceExpression, AggregationNode.Aggregation> candidateAggregation;
@@ -90,6 +119,9 @@ public class MinMaxByToWindowFunction
             candidateAggregation = maxByAggregations;
         }
         else {
+            return Result.empty();
+        }
+        if (candidateAggregation.values().stream().noneMatch(x -> x.getArguments().get(0).getType() instanceof MapType || x.getArguments().get(0).getType() instanceof ArrayType)) {
             return Result.empty();
         }
         boolean allMaxOrMinByWithSameField = candidateAggregation.values().stream().map(x -> x.getArguments().get(1)).distinct().count() == 1;

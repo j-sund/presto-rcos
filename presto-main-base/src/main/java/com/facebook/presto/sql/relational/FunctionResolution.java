@@ -313,6 +313,12 @@ public final class FunctionResolution
     }
 
     @Override
+    public boolean isCountIfFunction(FunctionHandle functionHandle)
+    {
+        return functionAndTypeResolver.getFunctionMetadata(functionHandle).getName().equals(functionAndTypeResolver.qualifyObjectName(QualifiedName.of("count_if")));
+    }
+
+    @Override
     public FunctionHandle countFunction()
     {
         return functionAndTypeResolver.lookupFunction("count", ImmutableList.of());
@@ -332,6 +338,12 @@ public final class FunctionResolution
     public boolean isMinByFunction(FunctionHandle functionHandle)
     {
         return functionAndTypeResolver.getFunctionMetadata(functionHandle).getName().equals(functionAndTypeResolver.qualifyObjectName(QualifiedName.of("min_by")));
+    }
+
+    @Override
+    public FunctionHandle arbitraryFunction(Type valueType)
+    {
+        return functionAndTypeResolver.lookupFunction("arbitrary", fromTypes(valueType));
     }
 
     @Override
@@ -412,6 +424,16 @@ public final class FunctionResolution
     public boolean isWindowValueFunction(FunctionHandle functionHandle)
     {
         return windowValueFunctions.contains(functionAndTypeResolver.getFunctionMetadata(functionHandle).getName());
+    }
+
+    public boolean isMapSubSetFunction(FunctionHandle functionHandle)
+    {
+        return functionAndTypeResolver.getFunctionMetadata(functionHandle).getName().equals(functionAndTypeResolver.qualifyObjectName(QualifiedName.of("map_subset")));
+    }
+
+    public boolean isMapFilterFunction(FunctionHandle functionHandle)
+    {
+        return functionAndTypeResolver.getFunctionMetadata(functionHandle).getName().equals(functionAndTypeResolver.qualifyObjectName(QualifiedName.of("map_filter")));
     }
 
     @Override

@@ -59,6 +59,7 @@ import java.util.Set;
 
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
+import static java.util.Locale.ENGLISH;
 
 public abstract class AbstractMockMetadata
         implements Metadata
@@ -393,13 +394,13 @@ public abstract class AbstractMockMetadata
     }
 
     @Override
-    public ColumnHandle getDeleteRowIdColumnHandle(Session session, TableHandle tableHandle)
+    public Optional<ColumnHandle> getDeleteRowIdColumn(Session session, TableHandle tableHandle)
     {
         throw new UnsupportedOperationException();
     }
 
     @Override
-    public ColumnHandle getUpdateRowIdColumnHandle(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns)
+    public Optional<ColumnHandle> getUpdateRowIdColumn(Session session, TableHandle tableHandle, List<ColumnHandle> updatedColumns)
     {
         throw new UnsupportedOperationException();
     }
@@ -678,5 +679,11 @@ public abstract class AbstractMockMetadata
     public void addConstraint(Session session, TableHandle tableHandle, TableConstraint<String> tableConstraint)
     {
         throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public String normalizeIdentifier(Session session, String catalogName, String identifier)
+    {
+        return identifier.toLowerCase(ENGLISH);
     }
 }

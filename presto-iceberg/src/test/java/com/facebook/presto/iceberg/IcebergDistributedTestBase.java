@@ -45,6 +45,7 @@ import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.analyzer.MetadataResolver;
 import com.facebook.presto.spi.connector.classloader.ClassLoaderSafeConnectorMetadata;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.security.AllowAllAccessControl;
 import com.facebook.presto.spi.statistics.ColumnStatistics;
 import com.facebook.presto.spi.statistics.ConnectorHistogram;
@@ -113,6 +114,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -143,12 +145,15 @@ import static com.facebook.presto.iceberg.FileContent.POSITION_DELETES;
 import static com.facebook.presto.iceberg.IcebergQueryRunner.ICEBERG_CATALOG;
 import static com.facebook.presto.iceberg.IcebergQueryRunner.getIcebergDataDirectoryPath;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.DELETE_AS_JOIN_REWRITE_ENABLED;
+import static com.facebook.presto.iceberg.IcebergSessionProperties.DELETE_AS_JOIN_REWRITE_MAX_DELETE_COLUMNS;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.PUSHDOWN_FILTER_ENABLED;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.STATISTIC_SNAPSHOT_RECORD_DIFFERENCE_WEIGHT;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.anyNot;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.anyTree;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.exchange;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.filter;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.node;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.output;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
@@ -1423,6 +1428,36 @@ public abstract class IcebergDistributedTestBase
         assertQuery(session, "SELECT * FROM " + tableName, "VALUES (1, '1001', NULL, NULL), (3, '1003', NULL, NULL), (6, '1004', 1, NULL), (6, '1006', 2, 'th002')");
     }
 
+    @Test(dataProvider = "equalityDeleteOptions")
+    public void testEqualityDeletesWithDataSequenceNumber(String fileFormat, boolean joinRewriteEnabled)
+            throws Exception
+    {
+        Session session = deleteAsJoinEnabled(joinRewriteEnabled);
+        String tableName = "test_v2_row_delete_" + randomTableSuffix();
+        String tableName2 = "test_v2_row_delete_2_" + randomTableSuffix();
+        assertUpdate("CREATE TABLE " + tableName + "(id int, data varchar) WITH (\"write.format.default\" = '" + fileFormat + "')");
+        assertUpdate("INSERT INTO " + tableName + " VALUES (1, 'a')", 1);
+
+        assertUpdate("CREATE TABLE " + tableName2 + "(id int, data varchar) WITH (\"write.format.default\" = '" + fileFormat + "')");
+        assertUpdate("INSERT INTO " + tableName2 + " VALUES (1, 'a')", 1);
+
+        Table icebergTable = updateTable(tableName);
+        writeEqualityDeleteToNationTable(icebergTable, ImmutableMap.of("id", 1));
+
+        Table icebergTable2 = updateTable(tableName2);
+        writeEqualityDeleteToNationTable(icebergTable2, ImmutableMap.of("id", 1));
+
+        assertUpdate("INSERT INTO " + tableName + " VALUES (1, 'b'), (2, 'a'), (3, 'a')", 3);
+        assertUpdate("INSERT INTO " + tableName2 + " VALUES (1, 'b'), (2, 'a'), (3, 'a')", 3);
+
+        assertQuery(session, "SELECT * FROM " + tableName, "VALUES (1, 'b'), (2, 'a'), (3, 'a')");
+
+        assertQuery(session, "SELECT \"$data_sequence_number\", * FROM " + tableName, "VALUES (3, 1, 'b'), (3, 2, 'a'), (3, 3, 'a')");
+
+        assertQuery(session, "SELECT a.\"$data_sequence_number\", b.\"$data_sequence_number\" from " + tableName + " as a, " + tableName2 + " as b where a.id = b.id",
+                "VALUES (3, 3), (3, 3), (3, 3)");
+    }
+
     @Test
     public void testPartShowStatsWithFilters()
     {
@@ -2016,6 +2051,60 @@ public abstract class IcebergDistributedTestBase
         testDataSequenceNumberHiddenColumn();
     }
 
+    @Test
+    public void testDeletedHiddenColumn()
+    {
+        assertUpdate("DROP TABLE IF EXISTS test_deleted");
+        assertUpdate("CREATE TABLE test_deleted AS SELECT * FROM tpch.tiny.region WHERE regionkey=0", 1);
+        assertUpdate("INSERT INTO test_deleted SELECT * FROM tpch.tiny.region WHERE regionkey=1", 1);
+
+        assertQuery("SELECT \"$deleted\" FROM test_deleted", format("VALUES %s, %s", "false", "false"));
+
+        assertUpdate("DELETE FROM test_deleted WHERE regionkey=1", 1);
+        assertEquals(computeActual("SELECT * FROM test_deleted").getRowCount(), 1);
+        assertQuery("SELECT \"$deleted\" FROM test_deleted ORDER BY \"$deleted\"", format("VALUES %s, %s", "false", "true"));
+    }
+
+    @Test
+    public void testDeleteFilePathHiddenColumn()
+    {
+        assertUpdate("DROP TABLE IF EXISTS test_delete_file_path");
+        assertUpdate("CREATE TABLE test_delete_file_path AS SELECT * FROM tpch.tiny.region WHERE regionkey=0", 1);
+        assertUpdate("INSERT INTO test_delete_file_path SELECT * FROM tpch.tiny.region WHERE regionkey=1", 1);
+
+        assertQuery("SELECT \"$delete_file_path\" FROM test_delete_file_path", format("VALUES %s, %s", "NULL", "NULL"));
+
+        assertUpdate("DELETE FROM test_delete_file_path WHERE regionkey=1", 1);
+        assertEquals(computeActual("SELECT * FROM test_delete_file_path").getRowCount(), 1);
+        assertEquals(computeActual("SELECT \"$delete_file_path\" FROM test_delete_file_path").getRowCount(), 2);
+
+        assertUpdate("DELETE FROM test_delete_file_path WHERE regionkey=0", 1);
+        computeActual("SELECT \"$delete_file_path\" FROM test_delete_file_path").getMaterializedRows().forEach(row -> {
+            assertEquals(row.getFieldCount(), 1);
+            assertNotNull(row.getField(0));
+        });
+    }
+
+    @Test(dataProvider = "equalityDeleteOptions")
+    public void testEqualityDeletesWithDeletedHiddenColumn(String fileFormat, boolean joinRewriteEnabled)
+            throws Exception
+    {
+        Session session = deleteAsJoinEnabled(joinRewriteEnabled);
+        String tableName = "test_v2_row_delete_" + randomTableSuffix();
+        assertUpdate("CREATE TABLE " + tableName + "(id int, data varchar) WITH (\"write.format.default\" = '" + fileFormat + "')");
+        assertUpdate("INSERT INTO " + tableName + " VALUES (1, 'a')", 1);
+
+        Table icebergTable = updateTable(tableName);
+        writeEqualityDeleteToNationTable(icebergTable, ImmutableMap.of("id", 1));
+
+        assertUpdate("INSERT INTO " + tableName + " VALUES (1, 'b'), (2, 'a'), (3, 'a')", 3);
+
+        assertQuery(session, "SELECT * FROM " + tableName, "VALUES (1, 'b'), (2, 'a'), (3, 'a')");
+
+        assertQuery(session, "SELECT \"$deleted\", * FROM " + tableName,
+                "VALUES (true, 1, 'a'), (false, 1, 'b'), (false, 2, 'a'), (false, 3, 'a')");
+    }
+
     @DataProvider(name = "pushdownFilterEnabled")
     public Object[][] pushdownFilterEnabledProvider()
     {
@@ -2548,6 +2637,7 @@ public abstract class IcebergDistributedTestBase
 
     protected Table loadTable(String tableName)
     {
+        tableName = normalizeIdentifier(tableName, ICEBERG_CATALOG);
         Catalog catalog = CatalogUtil.loadCatalog(catalogType.getCatalogImpl(), ICEBERG_CATALOG, getProperties(), new Configuration());
         return catalog.loadTable(TableIdentifier.of("tpch", tableName));
     }
@@ -2820,5 +2910,150 @@ public abstract class IcebergDistributedTestBase
     {
         assertUpdate(session, "DROP TABLE " + table);
         assertFalse(getQueryRunner().tableExists(session, table));
+    }
+
+    @Test
+    public void testEqualityDeleteAsJoinWithMaximumFieldsLimitUnderLimit()
+            throws Exception
+    {
+        int maxColumns = 10;
+        String tableName = "test_eq_delete_under_max_cols_" + randomTableSuffix();
+
+        Session session = Session.builder(getQueryRunner().getDefaultSession())
+                .setCatalogSessionProperty(ICEBERG_CATALOG, DELETE_AS_JOIN_REWRITE_ENABLED, "true")
+                // Make sure the max columns is set to one more than the number of columns in the table
+                .setCatalogSessionProperty(ICEBERG_CATALOG, DELETE_AS_JOIN_REWRITE_MAX_DELETE_COLUMNS, "" + (maxColumns + 1))
+                .build();
+
+        try {
+            // Test with exactly max columns - should work fine
+            // Create table with specified number of columns
+            List<String> columnDefinitions = IntStream.range(0, maxColumns)
+                    .mapToObj(i -> "col_" + i + " varchar")
+                    .collect(Collectors.toList());
+            columnDefinitions.add(0, "id bigint");
+
+            String createTableSql = "CREATE TABLE " + tableName + " (" +
+                    String.join(", ", columnDefinitions) + ")";
+            assertUpdate(session, createTableSql);
+
+            // Insert test rows
+            for (int row = 1; row <= 3; row++) {
+                final int currentRow = row;
+                List<String> values = IntStream.range(0, maxColumns)
+                        .mapToObj(i -> "'val_" + currentRow + "_" + i + "'")
+                        .collect(Collectors.toList());
+                values.add(0, String.valueOf(currentRow));
+
+                String insertSql = "INSERT INTO " + tableName + " VALUES (" +
+                        String.join(", ", values) + ")";
+                assertUpdate(session, insertSql, 1);
+            }
+
+            // Verify all rows exist
+            assertQuery(session, "SELECT count(*) FROM " + tableName, "VALUES (3)");
+
+            // Update table to format version 2 and create equality delete files
+            Table icebergTable = updateTable(tableName);
+
+            // Create equality delete using ALL columns
+            Map<String, Object> deleteRow = new HashMap<>();
+            deleteRow.put("id", 2L);
+            for (int i = 0; i < maxColumns; i++) {
+                deleteRow.put("col_" + i, "val_2_" + i);
+            }
+
+            // Write equality delete with ALL columns
+            writeEqualityDeleteToNationTable(icebergTable, deleteRow);
+
+            // Query should work correctly regardless of optimization
+            assertQuery(session, "SELECT count(*) FROM " + tableName, "VALUES (2)");
+            assertQuery(session, "SELECT id FROM " + tableName + " ORDER BY id", "VALUES (1), (3)");
+
+            // With <= max columns, query plan should use JOIN (optimization enabled)
+            assertPlan(session, "SELECT * FROM " + tableName,
+                    anyTree(
+                        node(JoinNode.class,
+                            anyTree(tableScan(tableName)),
+                            anyTree(tableScan(tableName)))));
+        }
+        finally {
+            dropTable(session, tableName);
+        }
+    }
+
+    @Test
+    public void testEqualityDeleteAsJoinWithMaximumFieldsLimitOverLimit()
+            throws Exception
+    {
+        int maxColumns = 10;
+        String tableName = "test_eq_delete_max_cols_" + randomTableSuffix();
+
+        Session session = Session.builder(getQueryRunner().getDefaultSession())
+                .setCatalogSessionProperty(ICEBERG_CATALOG, DELETE_AS_JOIN_REWRITE_ENABLED, "true")
+                .setCatalogSessionProperty(ICEBERG_CATALOG, DELETE_AS_JOIN_REWRITE_MAX_DELETE_COLUMNS, "" + maxColumns)
+                .build();
+
+        try {
+            // Test with max columns - optimization should be disabled to prevent stack overflow
+            // Create table with specified number of columns
+            List<String> columnDefinitions = IntStream.range(0, maxColumns)
+                    .mapToObj(i -> "col_" + i + " varchar")
+                    .collect(Collectors.toList());
+            columnDefinitions.add(0, "id bigint");
+
+            String createTableSql = "CREATE TABLE " + tableName + " (" +
+                    String.join(", ", columnDefinitions) + ")";
+            assertUpdate(session, createTableSql);
+
+            // Insert test rows
+            for (int row = 1; row <= 3; row++) {
+                final int currentRow = row;
+                List<String> values = IntStream.range(0, maxColumns)
+                        .mapToObj(i -> "'val_" + currentRow + "_" + i + "'")
+                        .collect(Collectors.toList());
+                values.add(0, String.valueOf(currentRow));
+
+                String insertSql = "INSERT INTO " + tableName + " VALUES (" +
+                        String.join(", ", values) + ")";
+                assertUpdate(session, insertSql, 1);
+            }
+
+            // Verify all rows exist
+            assertQuery(session, "SELECT count(*) FROM " + tableName, "VALUES (3)");
+
+            // Update table to format version 2 and create equality delete files
+            Table icebergTable = updateTable(tableName);
+
+            // Create equality delete using ALL columns
+            Map<String, Object> deleteRow = new HashMap<>();
+            deleteRow.put("id", 2L);
+            for (int i = 0; i < maxColumns; i++) {
+                deleteRow.put("col_" + i, "val_2_" + i);
+            }
+
+            // Write equality delete with ALL columns
+            writeEqualityDeleteToNationTable(icebergTable, deleteRow);
+
+            // Query should work correctly regardless of optimization
+            assertQuery(session, "SELECT count(*) FROM " + tableName, "VALUES (2)");
+            assertQuery(session, "SELECT id FROM " + tableName + " ORDER BY id", "VALUES (1), (3)");
+
+            // With > max columns, optimization is disabled - no JOIN in plan
+            // Verify the query works but doesn't contain a join node
+            assertQuery(session, "SELECT * FROM " + tableName + " WHERE id = 1",
+                    "VALUES (" + Stream.concat(Stream.of("1"),
+                            IntStream.range(0, maxColumns).mapToObj(i -> "'val_1_" + i + "'"))
+                            .collect(Collectors.joining(", ")) + ")");
+
+            // To verify no join is present, we can check that the plan only contains table scan
+            assertPlan(session, "SELECT * FROM " + tableName,
+                    anyTree(
+                            anyNot(JoinNode.class,
+                                    tableScan(tableName))));
+        }
+        finally {
+            dropTable(session, tableName);
+        }
     }
 }
